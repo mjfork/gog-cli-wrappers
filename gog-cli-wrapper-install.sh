@@ -29,9 +29,12 @@ find_gog() {
         "/usr/local/bin/gog" \
         "/usr/bin/gog" \
         "$(command -v gog 2>/dev/null || true)"; do
-        if [[ -n "$path" && -x "$path" && "$(file -b "$path")" == *ELF* ]]; then
-            echo "$path"
-            return 0
+        if [[ -n "$path" && -x "$path" && -f "$path" ]]; then
+            # Check it's a binary (ELF magic bytes) not a script
+            if head -c 4 "$path" 2>/dev/null | grep -q "ELF"; then
+                echo "$path"
+                return 0
+            fi
         fi
     done
 
