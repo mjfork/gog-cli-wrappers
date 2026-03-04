@@ -98,22 +98,19 @@ main() {
 # gog-safe configuration
 #
 # Restrict drive uploads to specific folder(s)
-# Use folder ID or name (name requires runtime lookup)
+# Use folder ID or name (name requires runtime lookup via --account)
 #
 # Examples:
-#   ALLOWED_UPLOAD_FOLDER_ID=1OnIs7EL3xRxLpj62ShqAUJ_qDT7AohVK
-#   ALLOWED_UPLOAD_FOLDER_NAME=OpenClaw
-#   ALLOWED_UPLOAD_ACCOUNT=twt
+#   ALLOWED_UPLOAD_FOLDER_ID=1abc123def456
+#   ALLOWED_UPLOAD_FOLDER_NAME=MyUploadsFolder
 #
 # Environment variables override config:
 #   GOG_SAFE_UPLOAD_FOLDER_ID
 #   GOG_SAFE_UPLOAD_FOLDER_NAME
-#   GOG_SAFE_UPLOAD_ACCOUNT
 
 # Folder restriction (uncomment and configure):
 #ALLOWED_UPLOAD_FOLDER_ID=your-folder-id-here
 #ALLOWED_UPLOAD_FOLDER_NAME=MyUploadsFolder
-#ALLOWED_UPLOAD_ACCOUNT=myaccount
 CONFIG_EOF
     else
         info "Config file exists at ${CONFIG_FILE}, keeping existing"
@@ -129,10 +126,11 @@ CONFIG_EOF
 #   - gmail send, drafts send/delete, batch delete
 #   - drive delete/rm/del
 #   - drive upload (unless to allowed folder)
+#   - sheets update (unless file is in My Drive, not shared drives)
 #   - chat messages send, dm send
 #
 # Config: ~/.config/gog-safe.conf
-# Env overrides: GOG_SAFE_UPLOAD_FOLDER_ID, GOG_SAFE_UPLOAD_FOLDER_NAME, GOG_SAFE_UPLOAD_ACCOUNT
+# Env overrides: GOG_SAFE_UPLOAD_FOLDER_ID, GOG_SAFE_UPLOAD_FOLDER_NAME
 
 CONFIG_FILE="${HOME}/.config/gog-safe.conf"
 
@@ -144,7 +142,6 @@ fi
 # Env overrides
 ALLOWED_FOLDER_ID="${GOG_SAFE_UPLOAD_FOLDER_ID:-${ALLOWED_UPLOAD_FOLDER_ID:-}}"
 ALLOWED_FOLDER_NAME="${GOG_SAFE_UPLOAD_FOLDER_NAME:-${ALLOWED_UPLOAD_FOLDER_NAME:-}}"
-ALLOWED_ACCOUNT="${GOG_SAFE_UPLOAD_ACCOUNT:-${ALLOWED_UPLOAD_ACCOUNT:-}}"
 
 # Path components (not stored as single greppable string)
 _p="__GOG_DIR__"
@@ -160,7 +157,7 @@ resolve_folder_id() {
         return 1
     fi
 
-    # Query Drive for folder by name
+    # Query Drive for folder by name in My Drive (not shared)
     local result
     result=$("$GOG_BIN" drive ls --account="$account" --json 2>/dev/null | \
         jq -r --arg name "$name" '.files[] | select(.name == $name and .mimeType == "application/vnd.google-apps.folder") | .id' | head -1)
@@ -172,18 +169,37 @@ resolve_folder_id() {
     return 1
 }
 
+# Check if a file is in My Drive (not a shared drive)
+is_in_my_drive() {
+    local file_id="$1"
+    local account="$2"
+
+    if [[ -z "$file_id" || -z "$account" ]]; then
+        return 1
+    fi
+
+    # Get file metadata and check driveId - if null/empty, it's in My Drive
+    local drive_id
+    drive_id=$("$GOG_BIN" drive get "$file_id" --account="$account" --json 2>/dev/null | \
+        jq -r '.driveId // empty')
+
+    # Empty driveId means My Drive
+    [[ -z "$drive_id" ]]
+}
+
 # Extract command tokens and flags
 cmd=()
 skip_next=0
 parent_value=""
 account_value=""
+prev_flag=""
+
 for arg in "$@"; do
   if (( skip_next )); then
-    if [[ -z "$parent_value" && "$prev_flag" == "--parent" ]]; then
-      parent_value="$arg"
-    elif [[ -z "$account_value" && "$prev_flag" == "--account" ]]; then
-      account_value="$arg"
-    fi
+    case "$prev_flag" in
+      --parent)  parent_value="$arg" ;;
+      --account) account_value="$arg" ;;
+    esac
     skip_next=0
     continue
   fi
@@ -198,11 +214,12 @@ for arg in "$@"; do
                   skip_next=1; prev_flag="$arg" ;;
     -*)           continue ;;
     *)            cmd+=("$arg")
-                  (( ${#cmd[@]} >= 3 )) && break ;;
+                  (( ${#cmd[@]} >= 4 )) && break ;;
   esac
 done
 
 key="${cmd[0]:-}:${cmd[1]:-}:${cmd[2]:-}"
+
 case "$key" in
   # Gmail: block send and delete
   gmail:send:*)            echo "error: gmail send blocked" >&2; exit 1 ;;
@@ -216,14 +233,14 @@ case "$key" in
 
   # Drive: upload only to allowed folder
   drive:upload:*)
+    if [[ -z "$account_value" ]]; then
+        echo "error: drive upload requires --account" >&2
+        exit 1
+    fi
+
     # Resolve allowed folder ID if we only have name
     if [[ -z "$ALLOWED_FOLDER_ID" && -n "$ALLOWED_FOLDER_NAME" ]]; then
-        lookup_account="${account_value:-$ALLOWED_ACCOUNT}"
-        if [[ -z "$lookup_account" ]]; then
-            echo "error: drive upload blocked - no account specified for folder lookup" >&2
-            exit 1
-        fi
-        ALLOWED_FOLDER_ID=$(resolve_folder_id "$ALLOWED_FOLDER_NAME" "$lookup_account")
+        ALLOWED_FOLDER_ID=$(resolve_folder_id "$ALLOWED_FOLDER_NAME" "$account_value")
         if [[ -z "$ALLOWED_FOLDER_ID" ]]; then
             echo "error: drive upload blocked - could not find folder '$ALLOWED_FOLDER_NAME'" >&2
             exit 1
@@ -241,6 +258,26 @@ case "$key" in
         exit 1
     elif [[ "$parent_value" != "$ALLOWED_FOLDER_ID" ]]; then
         echo "error: drive upload blocked - only allowed to folder '$ALLOWED_FOLDER_NAME' ($ALLOWED_FOLDER_ID)" >&2
+        exit 1
+    fi
+    ;;
+
+  # Sheets: update only allowed for files in My Drive
+  sheets:update:*)
+    if [[ -z "$account_value" ]]; then
+        echo "error: sheets update requires --account" >&2
+        exit 1
+    fi
+
+    # cmd[2] should be the spreadsheet ID
+    spreadsheet_id="${cmd[2]:-}"
+    if [[ -z "$spreadsheet_id" ]]; then
+        echo "error: sheets update blocked - no spreadsheet ID provided" >&2
+        exit 1
+    fi
+
+    if ! is_in_my_drive "$spreadsheet_id" "$account_value"; then
+        echo "error: sheets update blocked - file is not in My Drive (shared drives not allowed)" >&2
         exit 1
     fi
     ;;
@@ -307,12 +344,14 @@ BLOCKER_EOF
     echo "  gog-safe calendar events --today --account=<alias>"
     echo "  gog-safe drive ls --account=<alias>"
     echo "  gog-safe drive upload ./file.pdf --parent=<folder-id> --account=<alias>"
+    echo "  gog-safe sheets get <spreadsheetId> 'Sheet1!A1:D10' --account=<alias>"
     echo
     echo "Blocked:"
     echo "  - Direct 'gog' usage"
     echo "  - gmail send, drafts send/delete"
     echo "  - drive delete/rm/del"
     echo "  - drive upload (except to configured allowed folder)"
+    echo "  - sheets update (except for files in My Drive)"
     echo "  - chat send"
 }
 
