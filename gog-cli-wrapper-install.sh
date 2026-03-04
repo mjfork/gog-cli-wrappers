@@ -110,10 +110,10 @@ main() {
 #   GOG_SAFE_UPLOAD_FOLDER_NAME
 #   GOG_SAFE_UPLOAD_ACCOUNT
 
-# Folder restriction (uncomment one):
-#ALLOWED_UPLOAD_FOLDER_ID=
-ALLOWED_UPLOAD_FOLDER_NAME=OpenClaw
-ALLOWED_UPLOAD_ACCOUNT=twt
+# Folder restriction (uncomment and configure):
+#ALLOWED_UPLOAD_FOLDER_ID=your-folder-id-here
+#ALLOWED_UPLOAD_FOLDER_NAME=MyUploadsFolder
+#ALLOWED_UPLOAD_ACCOUNT=myaccount
 CONFIG_EOF
     else
         info "Config file exists at ${CONFIG_FILE}, keeping existing"

@@ -39,11 +39,11 @@ After installation, edit `~/.config/gog-safe.conf`:
 
 ```bash
 # Restrict uploads to specific folder by ID
-ALLOWED_UPLOAD_FOLDER_ID=1OnIs7EL3xRxLpj62ShqAUJ_qDT7AohVK
+ALLOWED_UPLOAD_FOLDER_ID=your-folder-id-here
 
 # Or by name (resolved at runtime)
-ALLOWED_UPLOAD_FOLDER_NAME=OpenClaw
-ALLOWED_UPLOAD_ACCOUNT=twt
+ALLOWED_UPLOAD_FOLDER_NAME=MyUploadsFolder
+ALLOWED_UPLOAD_ACCOUNT=myaccount
 ```
 
 Environment variables override config:
@@ -76,7 +76,7 @@ gog-safe calendar events --today --account=work
 gog-safe drive ls --account=personal
 
 # Upload - only to allowed folder
-gog-safe drive upload ./file.pdf --parent=1OnIs7EL3xRxLpj62ShqAUJ_qDT7AohVK --account=twt
+gog-safe drive upload ./file.pdf --parent=<your-folder-id> --account=myaccount
 ```
 
 Direct `gog` calls will error:
@@ -87,8 +87,8 @@ error: gog is not available. Use gog-safe for Google Workspace access.
 
 Upload to wrong folder will error:
 ```
-$ gog-safe drive upload ./file.pdf --parent=some-other-folder --account=twt
-error: drive upload blocked - only allowed to folder 'OpenClaw' (1OnIs7EL3xRxLpj62ShqAUJ_qDT7AohVK)
+$ gog-safe drive upload ./file.pdf --parent=some-other-folder --account=myaccount
+error: drive upload blocked - only allowed to folder 'MyUploadsFolder' (<folder-id>)
 ```
 
 ## Security Notes
