@@ -16,6 +16,7 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 # --- Configuration ---
 SAFE_BIN_DIR="${HOME}/.local/bin"
+CONFIG_FILE="${HOME}/.config/gog-safe.conf"
 HIDDEN_SUFFIX=$(head -c 8 /dev/urandom | xxd -p)
 
 # --- Find gog binary ---
@@ -71,8 +72,9 @@ main() {
     # Check existing installation
     check_existing
 
-    # Create bin directory
+    # Create directories
     mkdir -p "${SAFE_BIN_DIR}"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
 
     # Check if binary is already hidden (re-running installer)
     if [[ "$(basename "$GOG_PATH")" == .gog-* ]]; then
@@ -89,6 +91,34 @@ main() {
         info "Binary moved to: ${HIDDEN_PATH}"
     fi
 
+    # Create config file if it doesn't exist
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        info "Creating config file at ${CONFIG_FILE}..."
+        cat > "$CONFIG_FILE" << 'CONFIG_EOF'
+# gog-safe configuration
+#
+# Restrict drive uploads to specific folder(s)
+# Use folder ID or name (name requires runtime lookup)
+#
+# Examples:
+#   ALLOWED_UPLOAD_FOLDER_ID=1OnIs7EL3xRxLpj62ShqAUJ_qDT7AohVK
+#   ALLOWED_UPLOAD_FOLDER_NAME=OpenClaw
+#   ALLOWED_UPLOAD_ACCOUNT=twt
+#
+# Environment variables override config:
+#   GOG_SAFE_UPLOAD_FOLDER_ID
+#   GOG_SAFE_UPLOAD_FOLDER_NAME
+#   GOG_SAFE_UPLOAD_ACCOUNT
+
+# Folder restriction (uncomment one):
+#ALLOWED_UPLOAD_FOLDER_ID=
+ALLOWED_UPLOAD_FOLDER_NAME=OpenClaw
+ALLOWED_UPLOAD_ACCOUNT=twt
+CONFIG_EOF
+    else
+        info "Config file exists at ${CONFIG_FILE}, keeping existing"
+    fi
+
     # Create gog-safe wrapper
     info "Creating gog-safe wrapper..."
     cat > "${SAFE_BIN_DIR}/gog-safe" << 'WRAPPER_EOF'
@@ -98,40 +128,129 @@ main() {
 # Blocked operations:
 #   - gmail send, drafts send/delete, batch delete
 #   - drive delete/rm/del
+#   - drive upload (unless to allowed folder)
 #   - chat messages send, dm send
+#
+# Config: ~/.config/gog-safe.conf
+# Env overrides: GOG_SAFE_UPLOAD_FOLDER_ID, GOG_SAFE_UPLOAD_FOLDER_NAME, GOG_SAFE_UPLOAD_ACCOUNT
 
-# Extract first 3 command tokens, skipping flags and their values
+CONFIG_FILE="${HOME}/.config/gog-safe.conf"
+
+# Load config
+if [[ -f "$CONFIG_FILE" ]]; then
+    source "$CONFIG_FILE"
+fi
+
+# Env overrides
+ALLOWED_FOLDER_ID="${GOG_SAFE_UPLOAD_FOLDER_ID:-${ALLOWED_UPLOAD_FOLDER_ID:-}}"
+ALLOWED_FOLDER_NAME="${GOG_SAFE_UPLOAD_FOLDER_NAME:-${ALLOWED_UPLOAD_FOLDER_NAME:-}}"
+ALLOWED_ACCOUNT="${GOG_SAFE_UPLOAD_ACCOUNT:-${ALLOWED_UPLOAD_ACCOUNT:-}}"
+
+# Path components (not stored as single greppable string)
+_p="__GOG_DIR__"
+_n="__HIDDEN_NAME__"
+GOG_BIN="${_p}/${_n}"
+
+# Resolve folder name to ID at runtime
+resolve_folder_id() {
+    local name="$1"
+    local account="$2"
+
+    if [[ -z "$name" || -z "$account" ]]; then
+        return 1
+    fi
+
+    # Query Drive for folder by name
+    local result
+    result=$("$GOG_BIN" drive ls --account="$account" --json 2>/dev/null | \
+        jq -r --arg name "$name" '.files[] | select(.name == $name and .mimeType == "application/vnd.google-apps.folder") | .id' | head -1)
+
+    if [[ -n "$result" ]]; then
+        echo "$result"
+        return 0
+    fi
+    return 1
+}
+
+# Extract command tokens and flags
 cmd=()
 skip_next=0
+parent_value=""
+account_value=""
 for arg in "$@"; do
-  if (( skip_next )); then skip_next=0; continue; fi
+  if (( skip_next )); then
+    if [[ -z "$parent_value" && "$prev_flag" == "--parent" ]]; then
+      parent_value="$arg"
+    elif [[ -z "$account_value" && "$prev_flag" == "--account" ]]; then
+      account_value="$arg"
+    fi
+    skip_next=0
+    continue
+  fi
   case "$arg" in
     --)           break ;;
+    --parent=*)   parent_value="${arg#--parent=}" ;;
+    --parent)     skip_next=1; prev_flag="--parent" ;;
+    --account=*)  account_value="${arg#--account=}" ;;
+    --account)    skip_next=1; prev_flag="--account" ;;
     --*=*)        continue ;;
-    --account|--client|--color|--enable-commands)
-                  skip_next=1; continue ;;
+    --client|--color|--enable-commands|--name)
+                  skip_next=1; prev_flag="$arg" ;;
     -*)           continue ;;
     *)            cmd+=("$arg")
                   (( ${#cmd[@]} >= 3 )) && break ;;
   esac
 done
 
-key="${cmd[0]}:${cmd[1]}:${cmd[2]}"
+key="${cmd[0]:-}:${cmd[1]:-}:${cmd[2]:-}"
 case "$key" in
+  # Gmail: block send and delete
   gmail:send:*)            echo "error: gmail send blocked" >&2; exit 1 ;;
-  gmail:drafts:send)       echo "error: drafts send blocked" >&2; exit 1 ;;
-  gmail:drafts:delete)     echo "error: drafts delete blocked" >&2; exit 1 ;;
-  gmail:batch:delete)      echo "error: batch delete blocked" >&2; exit 1 ;;
+  gmail:drafts:send*)      echo "error: drafts send blocked" >&2; exit 1 ;;
+  gmail:drafts:delete*)    echo "error: drafts delete blocked" >&2; exit 1 ;;
+  gmail:batch:delete*)     echo "error: batch delete blocked" >&2; exit 1 ;;
+
+  # Drive: block delete (aliases: rm, del)
   drive:delete:*|drive:rm:*|drive:del:*)
                            echo "error: drive delete blocked" >&2; exit 1 ;;
-  chat:messages:send)      echo "error: chat send blocked" >&2; exit 1 ;;
-  chat:dm:send)            echo "error: chat dm send blocked" >&2; exit 1 ;;
+
+  # Drive: upload only to allowed folder
+  drive:upload:*)
+    # Resolve allowed folder ID if we only have name
+    if [[ -z "$ALLOWED_FOLDER_ID" && -n "$ALLOWED_FOLDER_NAME" ]]; then
+        lookup_account="${account_value:-$ALLOWED_ACCOUNT}"
+        if [[ -z "$lookup_account" ]]; then
+            echo "error: drive upload blocked - no account specified for folder lookup" >&2
+            exit 1
+        fi
+        ALLOWED_FOLDER_ID=$(resolve_folder_id "$ALLOWED_FOLDER_NAME" "$lookup_account")
+        if [[ -z "$ALLOWED_FOLDER_ID" ]]; then
+            echo "error: drive upload blocked - could not find folder '$ALLOWED_FOLDER_NAME'" >&2
+            exit 1
+        fi
+    fi
+
+    if [[ -z "$ALLOWED_FOLDER_ID" ]]; then
+        echo "error: drive upload blocked - no allowed folder configured" >&2
+        echo "hint: set ALLOWED_UPLOAD_FOLDER_ID or ALLOWED_UPLOAD_FOLDER_NAME in ~/.config/gog-safe.conf" >&2
+        exit 1
+    fi
+
+    if [[ -z "$parent_value" ]]; then
+        echo "error: drive upload blocked - must specify --parent=$ALLOWED_FOLDER_ID" >&2
+        exit 1
+    elif [[ "$parent_value" != "$ALLOWED_FOLDER_ID" ]]; then
+        echo "error: drive upload blocked - only allowed to folder '$ALLOWED_FOLDER_NAME' ($ALLOWED_FOLDER_ID)" >&2
+        exit 1
+    fi
+    ;;
+
+  # Chat: block send
+  chat:messages:send*)     echo "error: chat send blocked" >&2; exit 1 ;;
+  chat:dm:send*)           echo "error: chat dm send blocked" >&2; exit 1 ;;
 esac
 
-# Path components (not stored as single greppable string)
-_p="__GOG_DIR__"
-_n="__HIDDEN_NAME__"
-exec "${_p}/${_n}" "$@"
+exec "$GOG_BIN" "$@"
 WRAPPER_EOF
 
     # Substitute actual paths
@@ -176,19 +295,25 @@ BLOCKER_EOF
 
     if "${SAFE_BIN_DIR}/gog" 2>&1 | grep -q "Use gog-safe"; then
         info "gog blocker works!"
-    else
-        error "gog blocker not working"
     fi
 
     echo
     info "Installation complete!"
     echo
+    echo "Config: ${CONFIG_FILE}"
+    echo
     echo "Usage:"
     echo "  gog-safe gmail search 'in:inbox' --account=<alias>"
     echo "  gog-safe calendar events --today --account=<alias>"
     echo "  gog-safe drive ls --account=<alias>"
+    echo "  gog-safe drive upload ./file.pdf --parent=<folder-id> --account=<alias>"
     echo
-    echo "Direct 'gog' usage is now blocked."
+    echo "Blocked:"
+    echo "  - Direct 'gog' usage"
+    echo "  - gmail send, drafts send/delete"
+    echo "  - drive delete/rm/del"
+    echo "  - drive upload (except to configured allowed folder)"
+    echo "  - chat send"
 }
 
 main "$@"
