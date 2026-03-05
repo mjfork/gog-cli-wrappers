@@ -273,6 +273,7 @@ resolve_and_validate_folder() {
 }
 
 # Extract command tokens and flags
+# Process ALL arguments - don't break early so we capture --account and --parent
 cmd=()
 skip_next=0
 parent_value=""
@@ -293,13 +294,13 @@ for arg in "$@"; do
     --parent=*)   parent_value="${arg#--parent=}" ;;
     --parent)     skip_next=1; prev_flag="--parent" ;;
     --account=*)  account_value="${arg#--account=}" ;;
-    --account)    skip_next=1; prev_flag="--account" ;;
+    --account|-a) skip_next=1; prev_flag="--account" ;;
     --*=*)        continue ;;
-    --client|--color|--enable-commands|--name)
+    --client|--color|--enable-commands|--name|--sheets|--text|--title)
                   skip_next=1; prev_flag="$arg" ;;
     -*)           continue ;;
-    *)            cmd+=("$arg")
-                  (( ${#cmd[@]} >= 4 )) && break ;;
+    *)            # Only collect first 4 positional args for command matching
+                  (( ${#cmd[@]} < 4 )) && cmd+=("$arg") ;;
   esac
 done
 
@@ -591,4 +592,4 @@ BLOCKER_EOF
 }
 
 main "$@"
-# v1.3.0
+# v1.3.1
