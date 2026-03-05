@@ -61,6 +61,8 @@ Environment variables override config:
 | `drive delete/rm/del` | Blocked |
 | `drive upload` | Allowed only to configured folder |
 | `sheets update` | Allowed only for files in My Drive |
+| `docs write/update` | Allowed only for files in My Drive |
+| `slides write/update` | Allowed only for files in My Drive |
 | `chat messages send` | Blocked |
 | `chat dm send` | Blocked |
 | All read operations | Allowed |

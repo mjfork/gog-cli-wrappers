@@ -23,7 +23,7 @@ HIDDEN_SUFFIX=$(head -c 8 /dev/urandom | xxd -p)
 find_gog() {
     local gog_path
 
-    # Check common locations
+    # Check common locations for original binary
     for path in \
         "/home/linuxbrew/.linuxbrew/bin/gog" \
         "/usr/local/bin/gog" \
@@ -36,6 +36,18 @@ find_gog() {
                 return 0
             fi
         fi
+    done
+
+    # Check for already-hidden binaries (reinstall case)
+    for dir in "/home/linuxbrew/.linuxbrew/bin" "/usr/local/bin" "/usr/bin"; do
+        for path in "$dir"/.gog-*; do
+            if [[ -x "$path" && -f "$path" ]]; then
+                if head -c 4 "$path" 2>/dev/null | grep -q "ELF"; then
+                    echo "$path"
+                    return 0
+                fi
+            fi
+        done
     done
 
     return 1
@@ -130,6 +142,8 @@ CONFIG_EOF
 #   - drive delete/rm/del
 #   - drive upload (unless to allowed folder)
 #   - sheets update (unless file is in My Drive, not shared drives)
+#   - docs write/update (unless file is in My Drive, not shared drives)
+#   - slides write/update (unless file is in My Drive, not shared drives)
 #   - chat messages send, dm send
 #
 # Config: ~/.config/gog-safe.conf
@@ -173,6 +187,7 @@ resolve_folder_id() {
 }
 
 # Check if a file is in My Drive (not a shared drive)
+# Fails closed - if lookup fails, returns false (not in My Drive)
 is_in_my_drive() {
     local file_id="$1"
     local account="$2"
@@ -181,10 +196,26 @@ is_in_my_drive() {
         return 1
     fi
 
-    # Get file metadata and check driveId - if null/empty, it's in My Drive
+    # Get file metadata - capture both output and exit code
+    local response
+    if ! response=$("$GOG_BIN" drive get "$file_id" --account="$account" --json 2>&1); then
+        # API call failed - fail closed
+        return 1
+    fi
+
+    # Check response isn't empty
+    if [[ -z "$response" ]]; then
+        return 1
+    fi
+
+    # Check for error in response (e.g., file not found)
+    if echo "$response" | jq -e 'has("error")' >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # Get driveId - if null/empty, it's in My Drive
     local drive_id
-    drive_id=$("$GOG_BIN" drive get "$file_id" --account="$account" --json 2>/dev/null | \
-        jq -r '.driveId // empty')
+    drive_id=$(echo "$response" | jq -r '.driveId // empty' 2>/dev/null)
 
     # Empty driveId means My Drive
     [[ -z "$drive_id" ]]
@@ -285,6 +316,44 @@ case "$key" in
     fi
     ;;
 
+  # Docs: write/update only allowed for files in My Drive
+  docs:write:*|docs:update:*)
+    if [[ -z "$account_value" ]]; then
+        echo "error: docs write requires --account" >&2
+        exit 1
+    fi
+
+    doc_id="${cmd[2]:-}"
+    if [[ -z "$doc_id" ]]; then
+        echo "error: docs write blocked - no document ID provided" >&2
+        exit 1
+    fi
+
+    if ! is_in_my_drive "$doc_id" "$account_value"; then
+        echo "error: docs write blocked - file is not in My Drive (shared drives not allowed)" >&2
+        exit 1
+    fi
+    ;;
+
+  # Slides: write/update only allowed for files in My Drive
+  slides:write:*|slides:update:*)
+    if [[ -z "$account_value" ]]; then
+        echo "error: slides write requires --account" >&2
+        exit 1
+    fi
+
+    presentation_id="${cmd[2]:-}"
+    if [[ -z "$presentation_id" ]]; then
+        echo "error: slides write blocked - no presentation ID provided" >&2
+        exit 1
+    fi
+
+    if ! is_in_my_drive "$presentation_id" "$account_value"; then
+        echo "error: slides write blocked - file is not in My Drive (shared drives not allowed)" >&2
+        exit 1
+    fi
+    ;;
+
   # Chat: block send
   chat:messages:send*)     echo "error: chat send blocked" >&2; exit 1 ;;
   chat:dm:send*)           echo "error: chat dm send blocked" >&2; exit 1 ;;
@@ -355,8 +424,10 @@ BLOCKER_EOF
     echo "  - drive delete/rm/del"
     echo "  - drive upload (except to configured allowed folder)"
     echo "  - sheets update (except for files in My Drive)"
+    echo "  - docs write/update (except for files in My Drive)"
+    echo "  - slides write/update (except for files in My Drive)"
     echo "  - chat send"
 }
 
 main "$@"
-# v1.0.1
+# v1.1.0
