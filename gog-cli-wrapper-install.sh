@@ -25,6 +25,7 @@ find_gog() {
 
     # Check common locations for original binary
     for path in \
+        "/home/ubuntu/gogcli/gogcli/bin/gog" \
         "/home/linuxbrew/.linuxbrew/bin/gog" \
         "/usr/local/bin/gog" \
         "/usr/bin/gog" \
@@ -141,9 +142,10 @@ CONFIG_EOF
 #   - gmail send, drafts send/delete, batch delete
 #   - drive delete/rm/del
 #   - drive upload (unless to allowed folder)
-#   - sheets update (unless file is in My Drive, not shared drives)
-#   - docs write/update (unless file is in My Drive, not shared drives)
-#   - slides write/update (unless file is in My Drive, not shared drives)
+#   - sheets create (auto-moved to allowed folder after creation)
+#   - sheets copy/update/append/clear/format (must be in allowed folder)
+#   - docs create/copy/write/update (unless in allowed folder)
+#   - slides create/copy/write/update (unless in allowed folder)
 #   - chat messages send, dm send
 #
 # Config: ~/.config/gog-safe.conf
@@ -221,6 +223,55 @@ is_in_my_drive() {
     [[ -z "$drive_id" ]]
 }
 
+# Check if a file is in a specific folder
+# Fails closed - if lookup fails, returns false
+is_in_folder() {
+    local file_id="$1"
+    local folder_id="$2"
+    local account="$3"
+
+    if [[ -z "$file_id" || -z "$folder_id" || -z "$account" ]]; then
+        return 1
+    fi
+
+    # Get file metadata
+    local response
+    if ! response=$("$GOG_BIN" drive get "$file_id" --account="$account" --json 2>&1); then
+        return 1
+    fi
+
+    if [[ -z "$response" ]]; then
+        return 1
+    fi
+
+    if echo "$response" | jq -e 'has("error")' >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # Check if folder_id is in parents array
+    local in_folder
+    in_folder=$(echo "$response" | jq -r --arg fid "$folder_id" '.parents // [] | map(select(. == $fid)) | length' 2>/dev/null)
+
+    [[ "$in_folder" -gt 0 ]]
+}
+
+# Resolve folder and validate for docs/slides operations
+resolve_and_validate_folder() {
+    local account="$1"
+
+    # Resolve allowed folder ID if we only have name
+    if [[ -z "$ALLOWED_FOLDER_ID" && -n "$ALLOWED_FOLDER_NAME" ]]; then
+        ALLOWED_FOLDER_ID=$(resolve_folder_id "$ALLOWED_FOLDER_NAME" "$account")
+    fi
+
+    if [[ -z "$ALLOWED_FOLDER_ID" ]]; then
+        echo "error: no allowed folder configured" >&2
+        echo "hint: set ALLOWED_UPLOAD_FOLDER_ID or ALLOWED_UPLOAD_FOLDER_NAME in ~/.config/gog-safe.conf" >&2
+        return 1
+    fi
+    return 0
+}
+
 # Extract command tokens and flags
 cmd=()
 skip_next=0
@@ -296,27 +347,108 @@ case "$key" in
     fi
     ;;
 
-  # Sheets: update only allowed for files in My Drive
-  sheets:update:*)
+  # Sheets: create - run then move to allowed folder (sheets API doesn't support --parent)
+  sheets:create:*)
     if [[ -z "$account_value" ]]; then
-        echo "error: sheets update requires --account" >&2
+        echo "error: sheets create requires --account" >&2
         exit 1
     fi
 
-    # cmd[2] should be the spreadsheet ID
-    spreadsheet_id="${cmd[2]:-}"
+    if ! resolve_and_validate_folder "$account_value"; then
+        exit 1
+    fi
+
+    # Run create and capture output
+    output=$("$GOG_BIN" "$@" --json 2>&1)
+    exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        echo "$output" >&2
+        exit $exit_code
+    fi
+
+    # Extract spreadsheet ID
+    spreadsheet_id=$(echo "$output" | jq -r '.spreadsheetId // .id // empty' 2>/dev/null)
+
     if [[ -z "$spreadsheet_id" ]]; then
-        echo "error: sheets update blocked - no spreadsheet ID provided" >&2
+        echo "error: sheets create succeeded but could not extract ID to move file" >&2
+        echo "$output"
         exit 1
     fi
 
-    if ! is_in_my_drive "$spreadsheet_id" "$account_value"; then
-        echo "error: sheets update blocked - file is not in My Drive (shared drives not allowed)" >&2
+    # Move to allowed folder
+    if ! "$GOG_BIN" drive move "$spreadsheet_id" --parent="$ALLOWED_FOLDER_ID" --account="$account_value" >/dev/null 2>&1; then
+        echo "warning: sheet created but failed to move to allowed folder" >&2
+    fi
+
+    echo "$output"
+    exit 0
+    ;;
+
+  # Sheets: copy only to allowed folder
+  sheets:copy:*)
+    if [[ -z "$account_value" ]]; then
+        echo "error: sheets copy requires --account" >&2
+        exit 1
+    fi
+
+    if ! resolve_and_validate_folder "$account_value"; then
+        exit 1
+    fi
+
+    if [[ -z "$parent_value" ]]; then
+        echo "error: sheets copy blocked - must specify --parent=$ALLOWED_FOLDER_ID" >&2
+        exit 1
+    elif [[ "$parent_value" != "$ALLOWED_FOLDER_ID" ]]; then
+        echo "error: sheets copy blocked - only allowed to folder '${ALLOWED_FOLDER_NAME:-}' ($ALLOWED_FOLDER_ID)" >&2
         exit 1
     fi
     ;;
 
-  # Docs: write/update only allowed for files in My Drive
+  # Sheets: update/append/clear/format only for files in allowed folder
+  sheets:update:*|sheets:append:*|sheets:clear:*|sheets:format:*)
+    if [[ -z "$account_value" ]]; then
+        echo "error: sheets ${cmd[1]} requires --account" >&2
+        exit 1
+    fi
+
+    spreadsheet_id="${cmd[2]:-}"
+    if [[ -z "$spreadsheet_id" ]]; then
+        echo "error: sheets ${cmd[1]} blocked - no spreadsheet ID provided" >&2
+        exit 1
+    fi
+
+    if ! resolve_and_validate_folder "$account_value"; then
+        exit 1
+    fi
+
+    if ! is_in_folder "$spreadsheet_id" "$ALLOWED_FOLDER_ID" "$account_value"; then
+        echo "error: sheets ${cmd[1]} blocked - file is not in allowed folder '${ALLOWED_FOLDER_NAME:-}' ($ALLOWED_FOLDER_ID)" >&2
+        exit 1
+    fi
+    ;;
+
+  # Docs: create/copy only to allowed folder
+  docs:create:*|docs:copy:*)
+    if [[ -z "$account_value" ]]; then
+        echo "error: docs ${cmd[1]} requires --account" >&2
+        exit 1
+    fi
+
+    if ! resolve_and_validate_folder "$account_value"; then
+        exit 1
+    fi
+
+    if [[ -z "$parent_value" ]]; then
+        echo "error: docs ${cmd[1]} blocked - must specify --parent=$ALLOWED_FOLDER_ID" >&2
+        exit 1
+    elif [[ "$parent_value" != "$ALLOWED_FOLDER_ID" ]]; then
+        echo "error: docs ${cmd[1]} blocked - only allowed to folder '${ALLOWED_FOLDER_NAME:-}' ($ALLOWED_FOLDER_ID)" >&2
+        exit 1
+    fi
+    ;;
+
+  # Docs: write/update only for files in allowed folder
   docs:write:*|docs:update:*)
     if [[ -z "$account_value" ]]; then
         echo "error: docs write requires --account" >&2
@@ -329,13 +461,37 @@ case "$key" in
         exit 1
     fi
 
-    if ! is_in_my_drive "$doc_id" "$account_value"; then
-        echo "error: docs write blocked - file is not in My Drive (shared drives not allowed)" >&2
+    if ! resolve_and_validate_folder "$account_value"; then
+        exit 1
+    fi
+
+    if ! is_in_folder "$doc_id" "$ALLOWED_FOLDER_ID" "$account_value"; then
+        echo "error: docs write blocked - file is not in allowed folder '${ALLOWED_FOLDER_NAME:-}' ($ALLOWED_FOLDER_ID)" >&2
         exit 1
     fi
     ;;
 
-  # Slides: write/update only allowed for files in My Drive
+  # Slides: create/copy only to allowed folder
+  slides:create:*|slides:copy:*)
+    if [[ -z "$account_value" ]]; then
+        echo "error: slides ${cmd[1]} requires --account" >&2
+        exit 1
+    fi
+
+    if ! resolve_and_validate_folder "$account_value"; then
+        exit 1
+    fi
+
+    if [[ -z "$parent_value" ]]; then
+        echo "error: slides ${cmd[1]} blocked - must specify --parent=$ALLOWED_FOLDER_ID" >&2
+        exit 1
+    elif [[ "$parent_value" != "$ALLOWED_FOLDER_ID" ]]; then
+        echo "error: slides ${cmd[1]} blocked - only allowed to folder '${ALLOWED_FOLDER_NAME:-}' ($ALLOWED_FOLDER_ID)" >&2
+        exit 1
+    fi
+    ;;
+
+  # Slides: write/update only for files in allowed folder
   slides:write:*|slides:update:*)
     if [[ -z "$account_value" ]]; then
         echo "error: slides write requires --account" >&2
@@ -348,8 +504,12 @@ case "$key" in
         exit 1
     fi
 
-    if ! is_in_my_drive "$presentation_id" "$account_value"; then
-        echo "error: slides write blocked - file is not in My Drive (shared drives not allowed)" >&2
+    if ! resolve_and_validate_folder "$account_value"; then
+        exit 1
+    fi
+
+    if ! is_in_folder "$presentation_id" "$ALLOWED_FOLDER_ID" "$account_value"; then
+        echo "error: slides write blocked - file is not in allowed folder '${ALLOWED_FOLDER_NAME:-}' ($ALLOWED_FOLDER_ID)" >&2
         exit 1
     fi
     ;;
@@ -422,12 +582,13 @@ BLOCKER_EOF
     echo "  - Direct 'gog' usage"
     echo "  - gmail send, drafts send/delete"
     echo "  - drive delete/rm/del"
-    echo "  - drive upload (except to configured allowed folder)"
-    echo "  - sheets update (except for files in My Drive)"
-    echo "  - docs write/update (except for files in My Drive)"
-    echo "  - slides write/update (except for files in My Drive)"
+    echo "  - drive upload (except to allowed folder)"
+    echo "  - sheets create (auto-moved to allowed folder)"
+    echo "  - sheets copy/update/append/clear/format (must be in allowed folder)"
+    echo "  - docs create/copy/write/update (must be in allowed folder)"
+    echo "  - slides create/copy/write/update (must be in allowed folder)"
     echo "  - chat send"
 }
 
 main "$@"
-# v1.1.0
+# v1.3.0

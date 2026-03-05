@@ -60,9 +60,13 @@ Environment variables override config:
 | `gmail batch delete` | Blocked |
 | `drive delete/rm/del` | Blocked |
 | `drive upload` | Allowed only to configured folder |
-| `sheets update` | Allowed only for files in My Drive |
-| `docs write/update` | Allowed only for files in My Drive |
-| `slides write/update` | Allowed only for files in My Drive |
+| `sheets create` | Auto-moved to allowed folder after creation |
+| `sheets copy` | Destination must be allowed folder |
+| `sheets update/append/clear/format` | File must be in allowed folder |
+| `docs create/copy` | Destination must be allowed folder |
+| `docs write/update` | File must be in allowed folder |
+| `slides create/copy` | Destination must be allowed folder |
+| `slides write/update` | File must be in allowed folder |
 | `chat messages send` | Blocked |
 | `chat dm send` | Blocked |
 | All read operations | Allowed |
