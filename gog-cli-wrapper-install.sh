@@ -215,9 +215,9 @@ is_in_my_drive() {
         return 1
     fi
 
-    # Get driveId - if null/empty, it's in My Drive
+    # Get driveId - if null/empty, it's in My Drive (handle both .file.driveId and .driveId)
     local drive_id
-    drive_id=$(echo "$response" | jq -r '.driveId // empty' 2>/dev/null)
+    drive_id=$(echo "$response" | jq -r '(.file.driveId // .driveId) // empty' 2>/dev/null)
 
     # Empty driveId means My Drive
     [[ -z "$drive_id" ]]
@@ -248,9 +248,9 @@ is_in_folder() {
         return 1
     fi
 
-    # Check if folder_id is in parents array
+    # Check if folder_id is in parents array (handle both .file.parents and .parents)
     local in_folder
-    in_folder=$(echo "$response" | jq -r --arg fid "$folder_id" '.parents // [] | map(select(. == $fid)) | length' 2>/dev/null)
+    in_folder=$(echo "$response" | jq -r --arg fid "$folder_id" '(.file.parents // .parents // []) | map(select(. == $fid)) | length' 2>/dev/null)
 
     [[ "$in_folder" -gt 0 ]]
 }
@@ -592,4 +592,4 @@ BLOCKER_EOF
 }
 
 main "$@"
-# v1.3.1
+# v1.3.2
